@@ -1,4 +1,10 @@
 {
+  "name": "ticket-management-backend",
+  "version": "1.0.0",
+  "main": "debug-server.js",
+  "scripts": {
+    "start": "node debug-server.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
