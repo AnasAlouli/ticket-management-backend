@@ -466,7 +466,7 @@
   });
 
   // Démarrer le serveur
-  app.listen(PORT, () => {
+  app.listen(5000, "0.0.0.0", () => {
     console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
     // Charger les données au démarrage
     loadMainData();
