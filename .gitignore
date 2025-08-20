@@ -1,0 +1,6 @@
+
+node_modules/
+excel/
+uploads/
+temp/
+.env

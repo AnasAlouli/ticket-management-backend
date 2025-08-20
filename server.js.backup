@@ -1,0 +1,520 @@
+const express = require("express")
+const cors = require("cors")
+const multer = require("multer")
+const XLSX = require("xlsx")
+const fs = require("fs")
+const path = require("path")
+
+const app = express()
+const PORT = 5000
+
+// Middleware
+app.use(cors())
+app.use(express.json())
+
+// Configuration des dossiers
+const EXCEL_DIR = path.join(__dirname, "excel")
+const UPLOADS_DIR = path.join(__dirname, "uploads")
+const TEMP_DIR = path.join(__dirname, "temp")
+
+// Créer les dossiers s'ils n'existent pas
+;[EXCEL_DIR, UPLOADS_DIR, TEMP_DIR].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+})
+
+// Configuration multer pour l'upload
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, UPLOADS_DIR)
+  },
+  filename: (req, file, cb) => {
+    const timestamp = Date.now()
+    const originalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")
+    cb(null, `upload_${timestamp}_${originalName}`)
+  },
+})
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-excel",
+    ]
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true)
+    } else {
+      cb(new Error("Type de fichier non supporté"), false)
+    }
+  },
+})
+
+// Variables globales pour le stockage temporaire
+let currentTicketsData = []
+let lastLoadedFile = null
+let dataCache = {
+  data: [],
+  lastModified: null,
+  source: null,
+}
+
+// Fonction pour lire un fichier Excel
+function readExcelFile(filePath) {
+  try {
+    console.log(`📖 Lecture du fichier: ${filePath}`)
+
+    if (!fs.existsSync(filePath)) {
+      console.log(`❌ Fichier non trouvé: ${filePath}`)
+      return []
+    }
+
+    const workbook = XLSX.readFile(filePath)
+    const sheetName = workbook.SheetNames[0]
+    const worksheet = workbook.Sheets[sheetName]
+    const data = XLSX.utils.sheet_to_json(worksheet)
+
+    console.log(`✅ ${data.length} lignes lues depuis ${path.basename(filePath)}`)
+    return data
+  } catch (error) {
+    console.error(`❌ Erreur lecture Excel:`, error.message)
+    return []
+  }
+}
+
+// Fonction pour sauvegarder dans Excel
+function saveToExcel(data, filename = "tickets.xlsx") {
+  try {
+    const filePath = path.join(EXCEL_DIR, filename)
+    const worksheet = XLSX.utils.json_to_sheet(data)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Tickets")
+    XLSX.writeFile(workbook, filePath)
+
+    console.log(`💾 Données sauvegardées dans ${filename}`)
+    return true
+  } catch (error) {
+    console.error("❌ Erreur sauvegarde Excel:", error.message)
+    return false
+  }
+}
+
+// Fonction pour charger les données depuis le fichier principal
+function loadMainData() {
+  const mainFile = path.join(EXCEL_DIR, "tickets.xlsx")
+
+  if (fs.existsSync(mainFile)) {
+    const stats = fs.statSync(mainFile)
+
+    // Vérifier si le cache est encore valide
+    if (
+      dataCache.lastModified &&
+      dataCache.lastModified.getTime() === stats.mtime.getTime() &&
+      dataCache.source === "main"
+    ) {
+      console.log("📋 Utilisation du cache (fichier principal)")
+      return dataCache.data
+    }
+
+    const data = readExcelFile(mainFile)
+
+    // Mettre à jour le cache
+    dataCache = {
+      data: data,
+      lastModified: stats.mtime,
+      source: "main",
+    }
+
+    currentTicketsData = data
+    lastLoadedFile = mainFile
+    return data
+  }
+
+  console.log("⚠️ Aucun fichier principal trouvé")
+  return []
+}
+
+// Fonction pour charger les données temporaires
+function loadTempData() {
+  if (currentTicketsData.length > 0 && dataCache.source === "temp") {
+    console.log("📋 Utilisation des données temporaires en mémoire")
+    return currentTicketsData
+  }
+
+  // Fallback vers le fichier principal
+  return loadMainData()
+}
+
+// Routes API
+
+// GET /api/tickets - Récupérer tous les tickets
+app.get("/api/tickets", (req, res) => {
+  try {
+    const tickets = loadTempData()
+
+    res.json(tickets)
+    console.log(`📊 ${tickets.length} tickets envoyés au frontend`)
+  } catch (error) {
+    console.error("❌ Erreur GET /api/tickets:", error.message)
+    res.status(500).json({
+      message: "Erreur lors du chargement des tickets",
+      error: error.message,
+    })
+  }
+})
+
+// POST /api/tickets - Créer un nouveau ticket
+app.post("/api/tickets", (req, res) => {
+  try {
+    const newTicket = req.body
+
+    // Validation des champs requis
+    const requiredFields = ["Incident Number", "Caller name", "Country (Caller)"]
+    const missingFields = requiredFields.filter((field) => !newTicket[field])
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        message: `Champs requis manquants: ${missingFields.join(", ")}`,
+      })
+    }
+
+    // Charger les données actuelles
+    const tickets = loadTempData()
+
+    // Vérifier si le ticket existe déjà
+    const exists = tickets.some((t) => t["Incident Number"] === newTicket["Incident Number"])
+    if (exists) {
+      return res.status(400).json({
+        message: "Un ticket avec ce numéro existe déjà",
+      })
+    }
+
+    // Ajouter le nouveau ticket
+    tickets.push(newTicket)
+
+    // Mettre à jour les données temporaires
+    currentTicketsData = tickets
+    dataCache = {
+      data: tickets,
+      lastModified: new Date(),
+      source: "temp",
+    }
+
+    // Sauvegarder dans le fichier principal
+    const saved = saveToExcel(tickets)
+
+    if (!saved) {
+      return res.status(500).json({
+        message: "Erreur lors de la sauvegarde",
+      })
+    }
+
+    console.log(`✅ Nouveau ticket créé: ${newTicket["Incident Number"]}`)
+    res.json({
+      message: "Ticket créé avec succès",
+      ticket: newTicket,
+    })
+  } catch (error) {
+    console.error("❌ Erreur POST /api/tickets:", error.message)
+    res.status(500).json({
+      message: "Erreur lors de la création du ticket",
+      error: error.message,
+    })
+  }
+})
+
+// PUT /api/tickets/:id - Mettre à jour un ticket
+app.put("/api/tickets/:id", (req, res) => {
+  try {
+    const id = req.params.id
+    const updatedData = req.body
+
+    const tickets = loadTempData()
+    const index = tickets.findIndex((t) => t["Incident Number"] === id)
+
+    if (index === -1) {
+      return res.status(404).json({
+        message: "Ticket non trouvé",
+      })
+    }
+
+    // Mettre à jour le ticket
+    tickets[index] = { ...tickets[index], ...updatedData }
+
+    // Mettre à jour les données temporaires
+    currentTicketsData = tickets
+    dataCache = {
+      data: tickets,
+      lastModified: new Date(),
+      source: "temp",
+    }
+
+    // Sauvegarder dans le fichier principal
+    const saved = saveToExcel(tickets)
+
+    if (!saved) {
+      return res.status(500).json({
+        message: "Erreur lors de la sauvegarde",
+      })
+    }
+
+    console.log(`✅ Ticket mis à jour: ${id}`)
+    res.json({
+      message: "Ticket mis à jour avec succès",
+    })
+  } catch (error) {
+    console.error("❌ Erreur PUT /api/tickets:", error.message)
+    res.status(500).json({
+      message: "Erreur lors de la mise à jour",
+      error: error.message,
+    })
+  }
+})
+
+// DELETE /api/tickets/:id - Supprimer un ticket
+app.delete("/api/tickets/:id", (req, res) => {
+  try {
+    const id = req.params.id
+
+    const tickets = loadTempData()
+    const filteredTickets = tickets.filter((t) => t["Incident Number"] !== id)
+
+    if (tickets.length === filteredTickets.length) {
+      return res.status(404).json({
+        message: "Ticket non trouvé",
+      })
+    }
+
+    // Mettre à jour les données temporaires
+    currentTicketsData = filteredTickets
+    dataCache = {
+      data: filteredTickets,
+      lastModified: new Date(),
+      source: "temp",
+    }
+
+    // Sauvegarder dans le fichier principal
+    const saved = saveToExcel(filteredTickets)
+
+    if (!saved) {
+      return res.status(500).json({
+        message: "Erreur lors de la sauvegarde",
+      })
+    }
+
+    console.log(`🗑️ Ticket supprimé: ${id}`)
+    res.json({
+      message: "Ticket supprimé avec succès",
+    })
+  } catch (error) {
+    console.error("❌ Erreur DELETE /api/tickets:", error.message)
+    res.status(500).json({
+      message: "Erreur lors de la suppression",
+      error: error.message,
+    })
+  }
+})
+
+// POST /api/upload - Upload fichier Excel
+app.post("/api/upload", upload.single("excelFile"), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        message: "Aucun fichier fourni",
+      })
+    }
+
+    const uploadedFilePath = req.file.path
+    console.log(`📤 Fichier uploadé: ${req.file.filename}`)
+
+    // Lire le fichier Excel uploadé
+    const data = readExcelFile(uploadedFilePath)
+
+    if (data.length === 0) {
+      // Supprimer le fichier uploadé
+      fs.unlinkSync(uploadedFilePath)
+      return res.status(400).json({
+        message: "Le fichier Excel est vide ou illisible",
+      })
+    }
+
+    // Valider les données
+    let validRows = 0
+    let invalidRows = 0
+
+    data.forEach((row) => {
+      const requiredFields = ["Incident Number", "Caller name", "Country (Caller)"]
+      const hasAllFields = requiredFields.every((field) => row[field])
+
+      if (hasAllFields) {
+        validRows++
+      } else {
+        invalidRows++
+      }
+    })
+
+    // Stocker temporairement les données en mémoire
+    currentTicketsData = data
+    dataCache = {
+      data: data,
+      lastModified: new Date(),
+      source: "temp",
+    }
+
+    // Créer une copie dans le dossier temp avec timestamp
+    const timestamp = Date.now()
+    const tempFileName = `temp_${timestamp}_${req.file.originalname}`
+    const tempFilePath = path.join(TEMP_DIR, tempFileName)
+
+    // Copier le fichier vers temp
+    fs.copyFileSync(uploadedFilePath, tempFilePath)
+
+    // Sauvegarder aussi dans le fichier principal
+    const mainFilePath = path.join(EXCEL_DIR, "tickets.xlsx")
+    const worksheet = XLSX.utils.json_to_sheet(data)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Tickets")
+    XLSX.writeFile(workbook, mainFilePath)
+
+    // Supprimer le fichier d'upload original
+    fs.unlinkSync(uploadedFilePath)
+
+    console.log(`✅ Fichier traité et stocké temporairement`)
+    console.log(`📊 ${validRows} lignes valides, ${invalidRows} lignes invalides`)
+    console.log(`💾 Copie temporaire: ${tempFileName}`)
+
+    res.json({
+      message: "Fichier uploadé et traité avec succès",
+      fileName: req.file.originalname,
+      totalRows: data.length,
+      validRows,
+      invalidRows,
+      filePath: tempFileName,
+      tempStorage: true,
+    })
+  } catch (error) {
+    console.error("❌ Erreur upload:", error.message)
+
+    // Nettoyer le fichier en cas d'erreur
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path)
+    }
+
+    res.status(500).json({
+      message: "Erreur lors de l'upload du fichier",
+      error: error.message,
+    })
+  }
+})
+
+// POST /api/reload - Recharger les données depuis le fichier principal
+app.post("/api/reload", (req, res) => {
+  try {
+    console.log("🔄 Rechargement des données...")
+
+    // Vider le cache
+    dataCache = {
+      data: [],
+      lastModified: null,
+      source: null,
+    }
+
+    // Recharger depuis le fichier principal
+    const data = loadMainData()
+
+    res.json({
+      message: "Données rechargées avec succès",
+      totalRows: data.length,
+      source: "main",
+    })
+  } catch (error) {
+    console.error("❌ Erreur reload:", error.message)
+    res.status(500).json({
+      message: "Erreur lors du rechargement",
+      error: error.message,
+    })
+  }
+})
+
+// GET /api/status - Statut du serveur et des données
+app.get("/api/status", (req, res) => {
+  try {
+    const mainFile = path.join(EXCEL_DIR, "tickets.xlsx")
+    const mainFileExists = fs.existsSync(mainFile)
+
+    let mainFileStats = null
+    if (mainFileExists) {
+      const stats = fs.statSync(mainFile)
+      mainFileStats = {
+        size: stats.size,
+        modified: stats.mtime,
+        rows: 0,
+      }
+
+      try {
+        const data = readExcelFile(mainFile)
+        mainFileStats.rows = data.length
+      } catch (e) {
+        // Ignore errors for status
+      }
+    }
+
+    res.json({
+      server: "running",
+      port: PORT,
+      tempDataRows: currentTicketsData.length,
+      cacheSource: dataCache.source,
+      cacheLastModified: dataCache.lastModified,
+      mainFile: {
+        exists: mainFileExists,
+        path: mainFileExists ? mainFile : null,
+        stats: mainFileStats,
+      },
+      directories: {
+        excel: EXCEL_DIR,
+        uploads: UPLOADS_DIR,
+        temp: TEMP_DIR,
+      },
+    })
+  } catch (error) {
+    res.status(500).json({
+      message: "Erreur lors de la récupération du statut",
+      error: error.message,
+    })
+  }
+})
+
+// Initialisation au démarrage
+console.log("🚀 Initialisation du serveur...")
+console.log(`📁 Dossier Excel: ${EXCEL_DIR}`)
+console.log(`📁 Dossier Uploads: ${UPLOADS_DIR}`)
+console.log(`📁 Dossier Temp: ${TEMP_DIR}`)
+
+// Charger les données initiales
+const initialData = loadMainData()
+console.log(`📊 ${initialData.length} tickets chargés au démarrage`)
+
+// Démarrage du serveur
+app.listen(PORT, () => {
+  console.log(`✅ Serveur Express démarré sur le port ${PORT}`)
+  console.log(`🌐 API disponible sur http://localhost:${PORT}/api`)
+  console.log(`📋 Statut: http://localhost:${PORT}/api/status`)
+})
+
+// Gestion propre de l'arrêt
+process.on("SIGINT", () => {
+  console.log("\n🛑 Arrêt du serveur...")
+
+  // Sauvegarder les données temporaires si nécessaire
+  if (currentTicketsData.length > 0 && dataCache.source === "temp") {
+    console.log("💾 Sauvegarde des données temporaires...")
+    saveToExcel(currentTicketsData)
+  }
+
+  console.log("✅ Serveur arrêté proprement")
+  process.exit(0)
+})
