@@ -8,7 +8,7 @@
   const moment = require("moment");
 
   const app = express();
-  const PORT = 5000;
+  const PORT = process.env.PORT || 5000;
 
   // Middleware
   app.use(cors());
@@ -465,8 +465,9 @@
     }
   });
 
+
   // Démarrer le serveur
-  app.listen(5000, "0.0.0.0", () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
     // Charger les données au démarrage
     loadMainData();
