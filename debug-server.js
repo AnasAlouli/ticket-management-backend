@@ -470,9 +470,6 @@ app.get("/", (req, res) => {
 });
 
 
-  // Démarrer le serveur
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
-    // Charger les données au démarrage
-    loadMainData();
-  });
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Serveur lancé sur http://0.0.0.0:${PORT}`);
+});
