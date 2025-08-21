@@ -464,6 +464,10 @@
       res.status(500).json({ message: "Erreur export données" });
     }
   });
+// Route racine (health check)
+app.get("/", (req, res) => {
+  res.send("✅ API Incident Tracker en cours d'exécution !");
+});
 
 
   // Démarrer le serveur
